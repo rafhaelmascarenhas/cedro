@@ -1,0 +1,7 @@
+﻿node_modules/
+bun.lock
+bun.lockb
+package.json
+package-lock.json
+_*.mjs
+*.local
