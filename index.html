@@ -196,9 +196,57 @@ input[type=range]{flex:1;accent-color:var(--primary)}
 .empty-big{text-align:center;color:var(--muted);margin-top:60px;font-size:14px;line-height:1.9;font-weight:300}
 .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--dark);border:1px solid rgba(255,255,255,.1);color:#fff;padding:11px 20px;border-radius:9999px;font-size:13px;font-weight:400;z-index:200;opacity:0;transition:.25s;pointer-events:none;box-shadow:var(--shadow2)}
 .toast.show{opacity:1}
+
+/* ── LOGIN ── */
+#login-screen{position:fixed;inset:0;background:var(--canvas-soft);z-index:999;display:flex;align-items:center;justify-content:center}
+#login-screen.hidden{display:none}
+.login-card{background:var(--canvas);border:1px solid var(--hairline);border-radius:20px;padding:40px 36px;width:100%;max-width:400px;box-shadow:var(--shadow2);display:flex;flex-direction:column;align-items:center;gap:0}
+.login-logo{margin-bottom:28px}
+.login-title{font-size:22px;font-weight:300;letter-spacing:-.3px;color:var(--ink);margin-bottom:6px;text-align:center}
+.login-sub{font-size:13px;color:var(--muted);margin-bottom:28px;text-align:center}
+.login-form{width:100%;display:flex;flex-direction:column;gap:14px}
+.login-form .fg{margin:0}
+.login-form input{font-size:14px;padding:10px 12px}
+.login-err{font-size:12px;color:var(--red);text-align:center;min-height:18px;margin-top:-6px}
+.login-btn{width:100%;padding:12px;font-size:15px;border-radius:9999px;margin-top:4px}
+.login-footer{margin-top:28px;font-size:11px;color:var(--muted);text-align:center}
 </style>
 </head>
 <body>
+
+<!-- LOGIN SCREEN -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="login-logo">
+      <svg width="110" height="42" viewBox="0 0 94 21" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="0" y="0" width="17" height="17" rx="2" fill="#2c2c2c"/>
+        <rect x="19" y="0" width="17" height="17" rx="2" fill="#43a047"/>
+        <rect x="38" y="0" width="17" height="17" rx="2" fill="#e53935"/>
+        <rect x="57" y="0" width="17" height="17" rx="2" fill="#1e88e5"/>
+        <rect x="76" y="0" width="17" height="17" rx="2" fill="#fb8c00"/>
+        <rect x="0" y="0" width="17" height="4" rx="2" fill="rgba(255,255,255,.2)"/>
+        <rect x="19" y="0" width="17" height="4" rx="2" fill="rgba(255,255,255,.2)"/>
+        <rect x="38" y="0" width="17" height="4" rx="2" fill="rgba(255,255,255,.2)"/>
+        <rect x="57" y="0" width="17" height="4" rx="2" fill="rgba(255,255,255,.2)"/>
+        <rect x="76" y="0" width="17" height="4" rx="2" fill="rgba(255,255,255,.2)"/>
+        <text x="8.5" y="13" text-anchor="middle" font-family="Arial Black,sans-serif" font-weight="900" font-size="11" fill="white">C</text>
+        <text x="27.5" y="13" text-anchor="middle" font-family="Arial Black,sans-serif" font-weight="900" font-size="11" fill="white">E</text>
+        <text x="46.5" y="13" text-anchor="middle" font-family="Arial Black,sans-serif" font-weight="900" font-size="11" fill="white">D</text>
+        <text x="65.5" y="13" text-anchor="middle" font-family="Arial Black,sans-serif" font-weight="900" font-size="11" fill="white">R</text>
+        <text x="84.5" y="13" text-anchor="middle" font-family="Arial Black,sans-serif" font-weight="900" font-size="11" fill="white">O</text>
+      </svg>
+    </div>
+    <div class="login-title">Entrar no sistema</div>
+    <div class="login-sub">Orçamentos &amp; Carimbos</div>
+    <div class="login-form">
+      <div class="fg"><label>E-mail</label><input id="l-email" type="email" placeholder="seu@email.com" autocomplete="email"></div>
+      <div class="fg"><label>Senha</label><input id="l-pass" type="password" placeholder="••••••••" autocomplete="current-password"></div>
+      <div class="login-err" id="l-err"></div>
+      <button class="btn login-btn" onclick="doLogin()">Entrar</button>
+    </div>
+    <div class="login-footer">CEDRO Materiais Pedagógicos · Sistema interno</div>
+  </div>
+</div>
 
 <div class="nav">
   <div class="brand"><svg width="94" height="36" viewBox="0 0 94 36" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0"><!-- cubes --><rect x="0" y="4" width="17" height="17" rx="2" fill="#2c2c2c"/><rect x="19" y="4" width="17" height="17" rx="2" fill="#43a047"/><rect x="38" y="4" width="17" height="17" rx="2" fill="#e53935"/><rect x="57" y="4" width="17" height="17" rx="2" fill="#1e88e5"/><rect x="76" y="4" width="17" height="17" rx="2" fill="#fb8c00"/><!-- cube top sheen --><rect x="0" y="4" width="17" height="4" rx="2" fill="rgba(255,255,255,.18)"/><rect x="19" y="4" width="17" height="4" rx="2" fill="rgba(255,255,255,.18)"/><rect x="38" y="4" width="17" height="4" rx="2" fill="rgba(255,255,255,.18)"/><rect x="57" y="4" width="17" height="4" rx="2" fill="rgba(255,255,255,.18)"/><rect x="76" y="4" width="17" height="4" rx="2" fill="rgba(255,255,255,.18)"/><!-- letters --><text x="8.5" y="17" text-anchor="middle" font-family="Arial Black,sans-serif" font-weight="900" font-size="11" fill="white">C</text><text x="27.5" y="17" text-anchor="middle" font-family="Arial Black,sans-serif" font-weight="900" font-size="11" fill="white">E</text><text x="46.5" y="17" text-anchor="middle" font-family="Arial Black,sans-serif" font-weight="900" font-size="11" fill="white">D</text><text x="65.5" y="17" text-anchor="middle" font-family="Arial Black,sans-serif" font-weight="900" font-size="11" fill="white">R</text><text x="84.5" y="17" text-anchor="middle" font-family="Arial Black,sans-serif" font-weight="900" font-size="11" fill="white">O</text></svg></div>
@@ -880,7 +928,35 @@ async function exportPDF(){
   pdf.save(`${c.name.split(' ')[0].toLowerCase()}-${Vv('f-num')||'001'}-${cli}.pdf`);
 }
 
+// ═════════ AUTH (swap para Supabase depois) ═════════
+// Usuários locais — substituir por supabase.auth.signInWithPassword()
+const USERS=[
+  {email:'pablo.cedro@yahoo.com.br', pass:'cedro2025'},
+  {email:'admin@cedro.com.br',       pass:'cedro2025'}
+];
+function doLogin(){
+  const email=$('l-email').value.trim().toLowerCase();
+  const pass=$('l-pass').value;
+  const err=$('l-err');
+  err.textContent='';
+  if(!email||!pass){err.textContent='Preencha e-mail e senha.';return;}
+  const ok=USERS.find(u=>u.email===email&&u.pass===pass);
+  if(!ok){err.textContent='E-mail ou senha incorretos.';return;}
+  sessionStorage.setItem('cedro_user',email);
+  $('login-screen').classList.add('hidden');
+  toast('Bem-vindo, '+email.split('@')[0]);
+}
+function checkAuth(){
+  const u=sessionStorage.getItem('cedro_user');
+  if(u)$('login-screen').classList.add('hidden');
+}
+// Enter key no login
+['l-email','l-pass'].forEach(id=>{
+  $(id).addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
+});
+
 // ═════════ INIT ═════════
+checkAuth();
 fillCompanySelect();fillCropCompany();fillLibFilter();
 $('f-data').value=new Date().toISOString().split('T')[0];
 addRow();onCompanyChange();
