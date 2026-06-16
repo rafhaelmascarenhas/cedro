@@ -454,7 +454,17 @@ input[type=range]{flex:1;accent-color:var(--primary)}
 <div class="toast" id="toast"></div>
 
 <script>
-pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+// ── Dependency availability guard (VRC-2): fail loud if any CDN lib is missing ──
+(function(){
+  const missing=['pdfjsLib','PDFLib','jspdf','JSZip','html2canvas','docx'].filter(g=>typeof window[g]==='undefined');
+  if(missing.length||!window.supabase){
+    document.body.innerHTML='<div style="padding:2rem;font:16px Inter,system-ui,sans-serif;color:#0d253d;max-width:520px;margin:60px auto;line-height:1.7">⚠️ Falha ao carregar bibliotecas necessárias ('+(missing.join(', ')||'supabase')+').<br><br>Verifique sua conexão com a internet ou desative bloqueadores de conteúdo e recarregue a página.</div>';
+    throw new Error('Dependências ausentes: '+missing.join(', '));
+  }
+})();
+try{
+  pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+}catch(e){console.warn('pdf.js worker indisponível — render em main-thread',e);}
 
 const COLORS=['#003580','#1b6e3c','#7a1f2b','#5b2a86','#0a5a6b','#b8860b','#333333'];
 const LS={comp:'cedro_companies_v2',stamp:'cedro_stamps_v2',quote:'cedro_quotes_v2',ctr:'cedro_counters_v2'};
@@ -510,24 +520,61 @@ const coRow=c=>({name:c.name,cnpj:c.cnpj,ie:c.ie,address:c.address,city:c.city,p
 const quRow=q=>({company_id:q.companyId,num:q.num,date:q.date||null,validity:q.val,client_name:q.client.nome,client_cnpj:q.client.cnpj,client_address:q.client.end,client_city:q.client.cidade,client_phone:q.client.tel,items:q.items,payment:q.pagto,delivery:q.prazo,obs:q.obs,placed:q.placed});
 
 async function loadData(){
-  const[{data:co},{data:st},{data:qu},{data:ct}]=await Promise.all([
+  const[coRes,stRes,quRes,ctRes]=await Promise.all([
     sb.from('companies').select('*').order('name'),
     sb.from('stamps').select('*').order('name'),
     sb.from('quotes').select('*').order('created_at',{ascending:false}),
     sb.from('counters').select('*')
   ]);
-  companies=(co||[]).map(mapCo);
-  stamps=(st||[]).map(mapSt);
-  quotes=(qu||[]).map(mapQu);
-  counters=Object.fromEntries((ct||[]).map(r=>[r.company_id,r.value]));
-  if(!companies.length) await seedCompanies();
+  const err=coRes.error||stRes.error||quRes.error||ctRes.error;
+  if(err)throw new Error('Falha ao carregar dados: '+err.message);  // abort boot — do NOT re-seed
+  companies=(coRes.data||[]).map(mapCo);
+  stamps=(stRes.data||[]).map(mapSt);
+  quotes=(quRes.data||[]).map(mapQu);
+  counters=Object.fromEntries((ctRes.data||[]).map(r=>[r.company_id,r.value]));
+  if(companies.length===0) await seedCompanies();                  // only on confirmed-empty, error-free read
 }
 async function seedCompanies(){
   const rows=SEED.map(c=>({name:c.name,cnpj:c.cnpj,ie:c.ie,address:c.address,city:c.city,phone:c.phone,email:c.email,doc_title:c.docTitle,client_label:c.clientLabel,resp_label:c.respLabel,resp_name:c.respName,resp_cpf:c.respCpf,color:c.color,logo:null}));
-  const{data}=await sb.from('companies').insert(rows).select();
-  companies=(data||[]).map(mapCo);
+  // idempotent: UNIQUE(cnpj) + ignoreDuplicates closes the two-tab seed race (see supabase-migration.sql)
+  let{error}=await sb.from('companies').upsert(rows,{onConflict:'cnpj',ignoreDuplicates:true}).select();
+  if(error){ // fallback: migration (unique cnpj) ainda não aplicada → insert simples
+    ({error}=await sb.from('companies').insert(rows).select());
+    if(error)throw new Error('Falha ao popular empresas: '+error.message);
+  }
+  const{data:all,error:e2}=await sb.from('companies').select('*').order('name');
+  if(e2)throw new Error('Falha ao reler empresas: '+e2.message);
+  companies=(all||[]).map(mapCo);
 }
 function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1800);}
+
+// ── Shared helpers ──
+// Paginate a tall canvas into A4 pages (210mm wide). Slices into page-height bands.
+// Returns false (i.e. "no longer first page") so callers can chain across sections.
+function addCanvasPaged(pdf,cv,firstPage,fmt){
+  fmt=fmt||'jpeg';
+  const pxPerPage=cv.width*297/210; let y=0,first=firstPage!==false;
+  while(y<cv.height){
+    const sliceH=Math.min(pxPerPage,cv.height-y);
+    if(sliceH<1)break;
+    const tc=document.createElement('canvas');tc.width=cv.width;tc.height=Math.round(sliceH);
+    tc.getContext('2d').drawImage(cv,0,y,cv.width,sliceH,0,0,cv.width,Math.round(sliceH));
+    if(!first)pdf.addPage(); first=false;
+    const data=fmt==='png'?tc.toDataURL('image/png'):tc.toDataURL('image/jpeg',0.95);
+    pdf.addImage(data,fmt==='png'?'PNG':'JPEG',0,0,210,sliceH*210/cv.width);
+    y+=sliceH;
+  }
+  return first;
+}
+// Safe Supabase write: returns {data} on success, {error} on failure. Never throws.
+async function tryWrite(promise,okMsg){
+  const{data,error}=await promise;
+  if(error){toast(error.message||'Falha ao salvar — tente novamente');return {error};}
+  if(okMsg)toast(okMsg);
+  return {data};
+}
+// Natural aspect ratio (w/h) of an <img> element, or null if not yet decoded.
+function imgRatio(img){return (img&&img.naturalWidth&&img.naturalHeight)?img.naturalWidth/img.naturalHeight:null;}
 
 // ───────── VIEWS ─────────
 function showView(name){
@@ -613,7 +660,18 @@ function _placeDocStamp(s,pageDiv,x,y,w,h,existingUid,rot){
   el.innerHTML=`<div class="ps-ctrl"><button onclick="removeDocStamp('${id}')">✕</button></div><img src="${s.data}" draggable="false"><div class="ps-border"></div><div class="ps-resize"></div><div class="ps-rot" title="Girar (Shift trava 15°)"></div>`;
   pageDiv.appendChild(el);
   docPlaced.push({uid:id,stampId:s.id,page:+pageDiv.dataset.page,x,y,w,h,rot});
+  lockRatio(el,id,docPlaced);
   makeDragDoc(el,id);makeResizeDoc(el.querySelector('.ps-resize'),id);makeRotate(el,el.querySelector('.ps-rot'),id,docPlaced);
+}
+function lockRatio(el,id,list){
+  const img=el.querySelector('img');if(!img)return;
+  // Snap box height to the image's natural ratio so object-fit:contain is a no-op in BOTH
+  // the raster (html2canvas, which ignores object-fit) and vector exports — and normalizes
+  // legacy placements saved before ratio-lock existed. No-op when box already matches ratio.
+  const apply=()=>{const ar=imgRatio(img);if(!ar)return;
+    const w=parseInt(el.style.width)||img.naturalWidth;const nh=w/ar;
+    if(Math.abs((parseInt(el.style.height)||0)-nh)>0.5){el.style.height=nh+'px';const p=list.find(p=>p.uid===id);if(p)p.h=nh;}};
+  if(img.complete&&img.naturalWidth)apply(); else img.addEventListener('load',apply,{once:true});
 }
 function makeRotate(el,handle,id,list){
   handle.addEventListener('mousedown',e=>{e.preventDefault();e.stopPropagation();
@@ -623,8 +681,8 @@ function makeRotate(el,handle,id,list){
     document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);});
 }
 function removeDocStamp(id){const el=$(id);if(el)el.remove();docPlaced=docPlaced.filter(p=>p.uid!==id);}
-function makeDragDoc(el,id){el.addEventListener('mousedown',e=>{if(e.target.closest('.ps-ctrl')||e.target.classList.contains('ps-resize'))return;e.preventDefault();const ox=parseInt(el.style.left),oy=parseInt(el.style.top),ix=e.clientX,iy=e.clientY;const mv=e=>{const nx=ox+e.clientX-ix,ny=oy+e.clientY-iy;el.style.left=nx+'px';el.style.top=ny+'px';const p=docPlaced.find(p=>p.uid===id);if(p){p.x=nx;p.y=ny;}};const up=()=>{document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);};document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);});}
-function makeResizeDoc(h,id){h.addEventListener('mousedown',e=>{e.preventDefault();e.stopPropagation();const el=$(id),sw=parseInt(el.style.width),sh=parseInt(el.style.height),ix=e.clientX,iy=e.clientY;const mv=e=>{const nw=Math.max(40,sw+e.clientX-ix),nh=Math.max(20,sh+e.clientY-iy);el.style.width=nw+'px';el.style.height=nh+'px';const p=docPlaced.find(p=>p.uid===id);if(p){p.w=nw;p.h=nh;}};const up=()=>{document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);};document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);});}
+function makeDragDoc(el,id){el.addEventListener('mousedown',e=>{if(e.target.closest('.ps-ctrl')||e.target.classList.contains('ps-resize'))return;e.preventDefault();const ox=parseInt(el.style.left),oy=parseInt(el.style.top),ix=e.clientX,iy=e.clientY,par=el.parentElement;const mv=e=>{let nx=ox+e.clientX-ix,ny=oy+e.clientY-iy;if(par){nx=Math.max(0,Math.min(nx,par.clientWidth-el.offsetWidth));ny=Math.max(0,Math.min(ny,par.clientHeight-el.offsetHeight));}el.style.left=nx+'px';el.style.top=ny+'px';const p=docPlaced.find(p=>p.uid===id);if(p){p.x=nx;p.y=ny;}};const up=()=>{document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);};document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);});}
+function makeResizeDoc(h,id){h.addEventListener('mousedown',e=>{e.preventDefault();e.stopPropagation();const el=$(id),ar=imgRatio(el.querySelector('img')),sw=parseInt(el.style.width),sh=parseInt(el.style.height),ix=e.clientX,iy=e.clientY;const mv=e=>{const nw=Math.max(40,sw+e.clientX-ix);const nh=ar?nw/ar:Math.max(20,sh+e.clientY-iy);el.style.width=nw+'px';el.style.height=nh+'px';const p=docPlaced.find(p=>p.uid===id);if(p){p.w=nw;p.h=nh;}};const up=()=>{document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);};document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);});}
 
 async function exportStamped(){
   if(!docMode){toast('Suba um documento');return;}
@@ -633,38 +691,55 @@ async function exportStamped(){
   return exportStampedDOCX();
 }
 async function exportStampedPDF(){
-  const{PDFDocument,degrees}=PDFLib;
-  const pdf=await PDFDocument.load(docPdfBytes.slice(0));
-  const pages=pdf.getPages();
-  for(const p of docPlaced){
-    const s=stamps.find(s=>s.id===p.stampId);if(!s)continue;
-    const png=await pdf.embedPng(s.data);
-    const page=pages[p.page];const{height:Hp}=page.getSize();
-    const w=p.w/docScale,h=p.h/docScale;
-    const Cx=(p.x+p.w/2)/docScale, Cy=Hp-(p.y+p.h/2)/docScale; // center in PDF coords
-    const phi=-(p.rot||0)*Math.PI/180;                          // CSS clockwise -> pdf CCW
-    const co=Math.cos(phi),si=Math.sin(phi);
-    const x=Cx+(-w/2*co+h/2*si), y=Cy+(-w/2*si-h/2*co);         // rotated bottom-left
-    page.drawImage(png,{x,y,width:w,height:h,rotate:degrees(-(p.rot||0))});
-  }
-  const out=await pdf.save();dl(new Blob([out],{type:'application/pdf'}));
-  toast('PDF carimbado baixado (vetorial)');
+  try{
+    const{PDFDocument,degrees}=PDFLib;
+    const pdf=await PDFDocument.load(docPdfBytes.slice(0));
+    const pages=pdf.getPages();
+    for(const p of docPlaced){
+      const s=stamps.find(s=>s.id===p.stampId);if(!s)continue;
+      if(p.page<0||p.page>=pages.length)continue;            // stale placement after re-upload
+      // embed by real mime (PNG default, JPEG fallback) so a non-PNG stamp can't abort export
+      let img;
+      try{img=/^data:image\/jpe?g/i.test(s.data)?await pdf.embedJpg(s.data):await pdf.embedPng(s.data);}
+      catch(_){try{img=await pdf.embedJpg(s.data);}catch(__){continue;}}
+      const page=pages[p.page];const{height:Hp}=page.getSize();
+      let w=p.w/docScale,h=p.h/docScale;
+      const Cx=(p.x+p.w/2)/docScale, Cy=Hp-(p.y+p.h/2)/docScale; // box center in PDF coords
+      // contain-fit the image inside the w×h box (matches CSS object-fit:contain in the preview)
+      let dw=w,dh=h;
+      if(img.width>0&&img.height>0){
+        const ar=img.width/img.height, boxAr=w/h;
+        if(ar>boxAr){dh=w/ar;} else {dw=h*ar;}
+      }
+      const phi=-(p.rot||0)*Math.PI/180;                       // CSS clockwise -> pdf CCW
+      const co=Math.cos(phi),si=Math.sin(phi);
+      const x=Cx+(-dw/2*co+dh/2*si), y=Cy+(-dw/2*si-dh/2*co);   // rotated bottom-left of fitted rect
+      page.drawImage(img,{x,y,width:dw,height:dh,rotate:degrees(-(p.rot||0))});
+    }
+    const out=await pdf.save();dl(new Blob([out],{type:'application/pdf'}),'documento-carimbado.pdf');
+    toast('PDF carimbado baixado (vetorial)');
+  }catch(e){console.error(e);toast('Erro ao gerar PDF: '+e.message);}
 }
 async function exportStampedDOCX(){
-  document.querySelectorAll('#doc-pages .ps-ctrl,#doc-pages .ps-resize,#doc-pages .ps-border').forEach(el=>el.style.visibility='hidden');
-  const{jsPDF}=window.jspdf;const pdf=new jsPDF('p','mm','a4');
-  const secs=$('doc-pages').querySelectorAll('.doc-page');
-  for(let i=0;i<secs.length;i++){
-    const cv=await html2canvas(secs[i],{scale:2,backgroundColor:'#fff',useCORS:true,logging:false});
-    const h=cv.height*210/cv.width;
-    if(i)pdf.addPage();
-    pdf.addImage(cv.toDataURL('image/jpeg',0.95),'JPEG',0,0,210,Math.min(h,297));
-  }
-  document.querySelectorAll('#doc-pages .ps-ctrl,#doc-pages .ps-resize,#doc-pages .ps-border').forEach(el=>el.style.visibility='');
-  pdf.save('documento-carimbado.pdf');
-  toast('PDF carimbado baixado');
+  const ctrls=document.querySelectorAll('#doc-pages .ps-ctrl,#doc-pages .ps-resize,#doc-pages .ps-border');
+  ctrls.forEach(el=>el.style.visibility='hidden');
+  try{
+    await (document.fonts&&document.fonts.ready);                 // ensure fonts loaded → preview==export
+    const{jsPDF}=window.jspdf;const pdf=new jsPDF('p','mm','a4');
+    const secs=$('doc-pages').querySelectorAll('.doc-page');
+    let first=true;
+    for(let i=0;i<secs.length;i++){
+      const cv=await html2canvas(secs[i],{scale:3,backgroundColor:'#fff',useCORS:true,logging:false});
+      if(cv.height<1)continue;
+      first=addCanvasPaged(pdf,cv,first,'png');                   // paginate tall pages, PNG = crisp edges
+    }
+    if(first){toast('Documento vazio');return;}                  // nothing rendered → don't save blank PDF
+    pdf.save('documento-carimbado.pdf');
+    toast('PDF carimbado baixado');
+  }catch(e){console.error(e);toast('Erro ao gerar PDF: '+e.message);}
+  finally{ctrls.forEach(el=>el.style.visibility='');}
 }
-function dl(blob){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='documento-carimbado.pdf';a.click();}
+function dl(blob,name){const a=document.createElement('a');const url=URL.createObjectURL(blob);a.href=url;a.download=name||'documento-carimbado.pdf';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 
 // ═════════ EMPRESAS ═════════
 function renderCompanies(){
@@ -704,14 +779,22 @@ async function saveCompany(){
   const local={name:$('mc-name').value.trim(),cnpj:$('mc-cnpj').value.trim(),ie:$('mc-ie').value.trim(),address:$('mc-address').value.trim(),city:$('mc-city').value.trim(),phone:$('mc-phone').value.trim(),email:$('mc-email').value.trim(),docTitle:$('mc-docTitle').value,clientLabel:$('mc-clientLabel').value,respLabel:$('mc-respLabel').value,respName:$('mc-respName').value.trim(),respCpf:$('mc-respCpf').value.trim(),color:$('modal-company').dataset.color};
   if(!local.name){toast('Informe a razão social');return;}
   if(logoTmp!==undefined)local.logo=logoTmp; else local.logo=getCompany(id)?.logo||null;
-  if(id){local.id=id;await sb.from('companies').update(coRow(local)).eq('id',id);const c=getCompany(id);if(c)Object.assign(c,local);}
-  else{const{data}=await sb.from('companies').insert(coRow(local)).select().single();if(data){local.id=data.id;companies.push(mapCo(data));}}
+  if(id){
+    const{error}=await tryWrite(sb.from('companies').update(coRow(local)).eq('id',id));
+    if(error)return;
+    local.id=id;const c=getCompany(id);if(c)Object.assign(c,local);
+  } else {
+    const{data,error}=await tryWrite(sb.from('companies').insert(coRow(local)).select().single());
+    if(error||!data)return;
+    local.id=data.id;companies.push(mapCo(data));
+  }
   closeModal('modal-company');renderCompanies();fillCompanySelect();fillCropCompany();fillDocFilter();toast('Empresa salva');
 }
 async function deleteCompany(){
   const id=$('mc-id').value;if(!id)return;
   if(!confirm('Excluir esta empresa?'))return;
-  await sb.from('companies').delete().eq('id',id);
+  const{error}=await tryWrite(sb.from('companies').delete().eq('id',id));
+  if(error)return;
   companies=companies.filter(c=>c.id!==id);
   closeModal('modal-company');renderCompanies();fillCompanySelect();
 }
@@ -726,13 +809,27 @@ $('btn-draw').onclick=()=>{tool='draw';$('btn-draw').classList.add('active-tool'
 async function loadFile(input){
   const file=input.files[0];if(!file)return;
   if(file.type.startsWith('image/')){
-    const img=new Image();img.onload=()=>{const c=pc();c.width=img.width;c.height=img.height;c.getContext('2d').drawImage(img,0,0);syncSel();$('pg-nav').style.display='none';};img.src=URL.createObjectURL(file);pdfDoc=null;return;
+    const img=new Image();const url=URL.createObjectURL(file);
+    img.onload=()=>{
+      const c=pc();
+      // normalize display resolution so crop precision is consistent with PDF path
+      const MAX=1600,MIN=900,longest=Math.max(img.width,img.height);
+      let scale=1;if(longest>MAX)scale=MAX/longest;else if(longest<MIN)scale=MIN/longest;
+      c.width=Math.round(img.width*scale);c.height=Math.round(img.height*scale);
+      const ctx=c.getContext('2d');ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+      ctx.drawImage(img,0,0,c.width,c.height);
+      syncSel();$('pg-nav').style.display='none';URL.revokeObjectURL(url);
+    };
+    img.onerror=()=>{toast('Erro ao abrir: imagem inválida ou corrompida');URL.revokeObjectURL(url);};
+    img.src=url;pdfDoc=null;return;
   }
-  const buf=await file.arrayBuffer();
-  pdfDoc=await pdfjsLib.getDocument({data:buf}).promise;
-  pageCount=pdfDoc.numPages;pageNum=1;
-  $('pg-nav').style.display=pageCount>1?'flex':'none';
-  renderPage();
+  try{
+    const buf=await file.arrayBuffer();
+    pdfDoc=await pdfjsLib.getDocument({data:buf}).promise;
+    pageCount=pdfDoc.numPages;pageNum=1;
+    $('pg-nav').style.display=pageCount>1?'flex':'none';
+    await renderPage();                                       // await so render-time rejections are caught
+  }catch(e){toast('Erro ao abrir: '+e.message);console.error(e);}
 }
 async function renderPage(){
   const page=await pdfDoc.getPage(pageNum);
@@ -774,8 +871,9 @@ function updateCropPreview(){if(!cropRaw)return;$('crop-img').src=currentCropCan
 async function confirmCrop(){
   const name=$('crop-name').value.trim()||('Recorte '+(stamps.length+1));
   const row={company_id:$('crop-company').value,type:$('crop-type').value,name,data:currentCropCanvas().toDataURL('image/png')};
-  const{data}=await sb.from('stamps').insert(row).select().single();
-  if(data)stamps.push(mapSt(data));
+  const{data,error}=await tryWrite(sb.from('stamps').insert(row).select().single());
+  if(error||!data)return;                                  // keep modal open so user can retry
+  stamps.push(mapSt(data));
   closeModal('modal-crop');renderLib();renderPicker();renderCompanies();toast('Recorte salvo na biblioteca');
 }
 function fillCropCompany(){$('crop-company').innerHTML=companies.map(c=>`<option value="${c.id}">${c.name}</option>`).join('');}
@@ -790,7 +888,13 @@ function renderLib(){
     <div class="nm">${s.name}<div class="ty">${s.type} · ${c?c.name.split(' ')[0]:'?'}</div></div>
     <button class="btn red sm" onclick="delStamp('${s.id}')">✕</button></div>`;}).join('');
 }
-async function delStamp(id){await sb.from('stamps').delete().eq('id',id);stamps=stamps.filter(s=>s.id!==id);renderLib();renderPicker();renderCompanies();}
+async function delStamp(id){
+  const used=quotes.filter(q=>(q.placed||[]).some(p=>p.stampId===id)).length;
+  if(used&&!confirm('Este carimbo está em uso em '+used+' orçamento(s) salvo(s). Excluir mesmo assim? Eles ficarão sem o carimbo.'))return;
+  const{error}=await tryWrite(sb.from('stamps').delete().eq('id',id));
+  if(error)return;
+  stamps=stamps.filter(s=>s.id!==id);renderLib();renderPicker();renderCompanies();
+}
 
 // ═════════ ORÇAMENTO ═════════
 function fillCompanySelect(){
@@ -874,7 +978,15 @@ function renderA4(){
     <div class="doc-resp">${esc(c.respLabel)}: <b>${esc(c.respName)||'_______________________'}</b>${c.respCpf?' &nbsp; CPF: '+esc(c.respCpf):''}</div>
     <div class="doc-foot-line">CARIMBO / ASSINATURA</div>
   `;
-  prev.forEach(p=>{const s=stamps.find(s=>s.id===p.stampId);if(s)_placeStamp(s,p.x,p.y,p.w,p.h,p.uid,p.rot);});
+  // missing stamps render as a visible placeholder (no toast here — renderA4 fires on every keystroke)
+  prev.forEach(p=>{const s=stamps.find(s=>s.id===p.stampId);if(s)_placeStamp(s,p.x,p.y,p.w,p.h,p.uid,p.rot);else _placeMissing($('a4'),p);});
+}
+// Visible placeholder for a placement whose stamp was deleted from the library (SB-4)
+function _placeMissing(parent,p){
+  const el=document.createElement('div');el.className='ps-missing';
+  el.style.cssText=`position:absolute;left:${p.x}px;top:${p.y}px;width:${p.w}px;height:${p.h}px;transform:rotate(${p.rot||0}deg);border:1.5px dashed #ea2261;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:9px;color:#ea2261;text-align:center;background:rgba(234,34,97,.05);pointer-events:none;z-index:40`;
+  el.textContent='carimbo removido';
+  parent.appendChild(el);
 }
 
 function renderPicker(){
@@ -884,18 +996,30 @@ function renderPicker(){
   empty.style.display='none';
   el.innerHTML=list.map(s=>`<div class="picker-card" onclick="placeStamp('${s.id}')"><img src="${s.data}"><span>${s.name}</span></div>`).join('');
 }
-function placeStamp(stampId){const s=stamps.find(s=>s.id===stampId);if(!s)return;_placeStamp(s,420,920,170,90);}
+function placeStamp(stampId){
+  const s=stamps.find(s=>s.id===stampId);if(!s)return;
+  const a4=$('a4'),w=170,h=90;let x=420,y=920;
+  const foot=a4.querySelector('.doc-foot-line');           // anchor near the signature footer line
+  if(foot){
+    const ar=a4.getBoundingClientRect(),fr=foot.getBoundingClientRect();
+    x=Math.max(20,(fr.left-ar.left)+(foot.offsetWidth-w)/2);
+    y=Math.max(20,(fr.top-ar.top)-h-8);
+  }
+  const n=placedList.length;x+=n*14;y+=n*14;                // cascade so stamps don't stack exactly
+  _placeStamp(s,x,y,w,h);
+}
 function _placeStamp(s,x,y,w,h,existingUid,rot){
   const id=existingUid||uid('ps');rot=rot||0;const a4=$('a4');
   const el=document.createElement('div');el.className='ps';el.id=id;
   el.style.cssText=`left:${x}px;top:${y}px;width:${w}px;height:${h}px;transform:rotate(${rot}deg);`;
   el.innerHTML=`<div class="ps-ctrl"><button onclick="removeStamp('${id}')">✕</button></div><img src="${s.data}" draggable="false"><div class="ps-border"></div><div class="ps-resize"></div><div class="ps-rot" title="Girar (Shift trava 15°)"></div>`;
   a4.appendChild(el);placedList.push({uid:id,stampId:s.id,x,y,w,h,rot});
+  lockRatio(el,id,placedList);
   makeDrag(el,id);makeResize(el.querySelector('.ps-resize'),id);makeRotate(el,el.querySelector('.ps-rot'),id,placedList);
 }
 function removeStamp(id){const el=$(id);if(el)el.remove();placedList=placedList.filter(p=>p.uid!==id);}
 function makeDrag(el,id){el.addEventListener('mousedown',e=>{if(e.target.closest('.ps-ctrl')||e.target.classList.contains('ps-resize'))return;e.preventDefault();const ox=parseInt(el.style.left),oy=parseInt(el.style.top),ix=e.clientX,iy=e.clientY;const mv=e=>{const nx=ox+e.clientX-ix,ny=oy+e.clientY-iy;el.style.left=nx+'px';el.style.top=ny+'px';const p=placedList.find(p=>p.uid===id);if(p){p.x=nx;p.y=ny;}};const up=()=>{document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);};document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);});}
-function makeResize(h,id){h.addEventListener('mousedown',e=>{e.preventDefault();e.stopPropagation();const el=$(id),sw=parseInt(el.style.width),sh=parseInt(el.style.height),ix=e.clientX,iy=e.clientY;const mv=e=>{const nw=Math.max(40,sw+e.clientX-ix),nh=Math.max(20,sh+e.clientY-iy);el.style.width=nw+'px';el.style.height=nh+'px';const p=placedList.find(p=>p.uid===id);if(p){p.w=nw;p.h=nh;}};const up=()=>{document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);};document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);});}
+function makeResize(h,id){h.addEventListener('mousedown',e=>{e.preventDefault();e.stopPropagation();const el=$(id),ar=imgRatio(el.querySelector('img')),sw=parseInt(el.style.width),sh=parseInt(el.style.height),ix=e.clientX,iy=e.clientY;const mv=e=>{const nw=Math.max(40,sw+e.clientX-ix);const nh=ar?nw/ar:Math.max(20,sh+e.clientY-iy);el.style.width=nw+'px';el.style.height=nh+'px';const p=placedList.find(p=>p.uid===id);if(p){p.w=nw;p.h=nh;}};const up=()=>{document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);};document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);});}
 
 // ═════════ SAVE / HISTORY ═════════
 function collectQuote(){
@@ -909,13 +1033,27 @@ async function saveQuote(){
   if(!q.items.length){toast('Adicione ao menos 1 item');return;}
   const isNew=!quotes.find(x=>x.id===q.id);
   if(isNew){
-    const{data}=await sb.from('quotes').insert(quRow(q)).select().single();
-    if(data){q.id=data.id;currentQuoteId=data.id;quotes.unshift(mapQu(data));}
-    const n=parseInt(q.num)||1;
-    counters[q.companyId]=Math.max(counters[q.companyId]||0,n);
-    await sb.from('counters').upsert({company_id:q.companyId,value:counters[q.companyId]});
+    // Atomically allocate the next number server-side (RPC). Falls back to client counter
+    // if the RPC isn't deployed yet (see supabase-migration.sql).
+    const rpc=await sb.rpc('next_quote_number',{p_company:q.companyId});
+    if(!rpc.error&&rpc.data!=null){
+      q.num=String(rpc.data).padStart(3,'0');
+      counters[q.companyId]=rpc.data;
+    }else{
+      const n=parseInt(q.num)||((counters[q.companyId]||0)+1);
+      q.num=String(n).padStart(3,'0');
+    }
+    const{data,error}=await tryWrite(sb.from('quotes').insert(quRow(q)).select().single());
+    if(error||!data)return;                                  // no number consumed on failure path that matters
+    q.id=data.id;currentQuoteId=data.id;quotes.unshift(mapQu(data));
+    if(rpc.error||rpc.data==null){                           // legacy counter upkeep only when RPC absent
+      counters[q.companyId]=Math.max(counters[q.companyId]||0,parseInt(q.num)||1);
+      await sb.from('counters').upsert({company_id:q.companyId,value:counters[q.companyId]});
+    }
+    $('f-num').value=q.num;renderA4();                        // reflect authoritative number in the doc
   } else {
-    await sb.from('quotes').update(quRow(q)).eq('id',q.id);
+    const{error}=await tryWrite(sb.from('quotes').update(quRow(q)).eq('id',q.id));
+    if(error)return;
     const idx=quotes.findIndex(x=>x.id===q.id);if(idx>=0)quotes[idx]={...quotes[idx],...q};
   }
   toast('Orçamento '+q.num+' salvo');
@@ -936,11 +1074,12 @@ function loadQuote(id){
   $('f-pagto').value=q.pagto;$('f-prazo').value=q.prazo;$('f-obs').value=q.obs;
   $('items-body').innerHTML='';q.items.forEach(it=>addRow(it.desc,it.qty,it.unit));
   placedList=[];renderA4();
-  q.placed.forEach(p=>{const s=stamps.find(s=>s.id===p.stampId);if(s)_placeStamp(s,p.x,p.y,p.w,p.h,undefined,p.rot);});
-  showView('orcamento');toast('Orçamento '+q.num+' carregado');
+  let missing=0;
+  q.placed.forEach(p=>{const s=stamps.find(s=>s.id===p.stampId);if(s)_placeStamp(s,p.x,p.y,p.w,p.h,p.uid,p.rot);else{_placeMissing($('a4'),p);missing++;}});
+  showView('orcamento');toast(missing?('⚠ '+missing+' carimbo(s) deste orçamento foram removidos da biblioteca'):('Orçamento '+q.num+' carregado'));
 }
 function dupQuote(id){const q=quotes.find(x=>x.id===id);if(!q)return;loadQuote(id);currentQuoteId=null;$('f-num').value=nextNumber(q.companyId);toast('Cópia — salve para gerar novo nº');}
-async function delQuote(id){if(!confirm('Excluir este orçamento?'))return;await sb.from('quotes').delete().eq('id',id);quotes=quotes.filter(x=>x.id!==id);renderHistory();}
+async function delQuote(id){if(!confirm('Excluir este orçamento?'))return;const{error}=await tryWrite(sb.from('quotes').delete().eq('id',id));if(error)return;quotes=quotes.filter(x=>x.id!==id);renderHistory();}
 function renderHistory(){
   const el=$('hist-list');
   if(!quotes.length){el.innerHTML='<div class="empty-big">Nenhum orçamento salvo ainda.<br>Monte um e clique em 💾 Salvar.</div>';return;}
@@ -959,15 +1098,21 @@ function renderHistory(){
 // ═════════ PDF EXPORT ═════════
 async function exportPDF(){
   if(!$('v-orcamento').classList.contains('active')){showView('orcamento');}
-  document.querySelectorAll('.ps-ctrl,.ps-resize,.ps-border').forEach(el=>el.style.visibility='hidden');
-  const a4=$('a4');
-  const canvas=await html2canvas(a4,{scale:3,useCORS:true,backgroundColor:'#fff',logging:false});
-  document.querySelectorAll('.ps-ctrl,.ps-resize,.ps-border').forEach(el=>el.style.visibility='');
-  const{jsPDF}=window.jspdf;const pdf=new jsPDF('p','mm','a4');
-  const pageH=(canvas.height*210)/canvas.width;
-  pdf.addImage(canvas.toDataURL('image/jpeg',0.95),'JPEG',0,0,210,Math.min(pageH,297));
-  const c=currentCompany();const cli=(Vv('f-cliente')||'orcamento').replace(/\s+/g,'-').toLowerCase().slice(0,24);
-  pdf.save(`${c.name.split(' ')[0].toLowerCase()}-${Vv('f-num')||'001'}-${cli}.pdf`);
+  const ctrls=document.querySelectorAll('.ps-ctrl,.ps-resize,.ps-border');
+  ctrls.forEach(el=>el.style.visibility='hidden');
+  try{
+    await (document.fonts&&document.fonts.ready);                 // fonts loaded → preview==export
+    const a4=$('a4');
+    // cap raster scale on very long docs so mobile Safari doesn't return a blank canvas (~16M px ceiling)
+    const scale=(a4.scrollHeight*3>15000)?2:3;
+    const canvas=await html2canvas(a4,{scale,useCORS:true,backgroundColor:'#fff',logging:false});
+    if(canvas.height<1){toast('Documento vazio');return;}
+    const{jsPDF}=window.jspdf;const pdf=new jsPDF('p','mm','a4');
+    addCanvasPaged(pdf,canvas,true,'jpeg');                       // multi-page slicing (no squash)
+    const c=currentCompany();const cli=(Vv('f-cliente')||'orcamento').replace(/\s+/g,'-').toLowerCase().slice(0,24);
+    pdf.save(`${(c?c.name.split(' ')[0].toLowerCase():'orcamento')}-${Vv('f-num')||'001'}-${cli}.pdf`);
+  }catch(e){console.error(e);toast('Erro ao gerar PDF: '+e.message);}
+  finally{ctrls.forEach(el=>el.style.visibility='');}
 }
 
 // ═════════ AUTH (Supabase) ═════════
@@ -988,8 +1133,15 @@ async function checkAuth(){
 function doLogout(){sb.auth.signOut().then(()=>location.reload());}
 async function bootApp(){
   $('login-screen').classList.add('hidden');
-  $('login-screen').innerHTML+='<div style="position:absolute;inset:0;background:rgba(246,249,252,.8);display:flex;align-items:center;justify-content:center;font-size:13px;color:#64748d">Carregando...</div>';
-  await loadData();
+  $('login-screen').innerHTML+='<div id="boot-load" style="position:absolute;inset:0;background:rgba(246,249,252,.8);display:flex;align-items:center;justify-content:center;font-size:13px;color:#64748d">Carregando...</div>';
+  try{
+    await loadData();
+  }catch(e){
+    console.error(e);
+    $('login-screen').classList.remove('hidden');
+    $('boot-load').innerHTML='<div style="max-width:360px;text-align:center;color:#0d253d;padding:20px;line-height:1.7">⚠️ '+e.message+'<br><br><button class="btn" onclick="location.reload()">Tentar novamente</button></div>';
+    return;
+  }
   fillCompanySelect();fillCropCompany();fillLibFilter();fillDocFilter();
   $('f-data').value=new Date().toISOString().split('T')[0];
   addRow();onCompanyChange();
