@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CEDRO — Sistema de Orçamentos</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zeyada&family=Homemade+Apple&family=Mrs+Saint+Delafield&family=Nothing+You+Could+Do&family=Bad+Script&family=Herr+Von+Muellerhoff&family=La+Belle+Aurore&family=Caveat:wght@600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
@@ -114,6 +117,20 @@ input[type=file]{display:none}
 .lib-card .ty{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.1px}
 .ext-empty{font-size:12px;color:var(--muted);text-align:center;margin-top:24px;line-height:1.8}
 
+/* criar assinatura */
+.sig-tabs{display:flex;gap:4px;border-bottom:1px solid var(--hairline);margin-bottom:14px}
+.sig-tabs button{background:none;border:none;padding:8px 16px;font-size:13px;cursor:pointer;color:#667;border-bottom:2px solid transparent}
+.sig-tabs button.on{color:#e94560;border-bottom-color:#e94560;font-weight:600}
+.sig-pane{display:none}.sig-pane.on{display:block}
+.sig-colors{display:flex;gap:8px;justify-content:flex-end;margin-bottom:10px}
+.sig-colors span{width:20px;height:20px;border-radius:50%;cursor:pointer;border:2px solid transparent}
+.sig-colors span.on{border-color:#aab;box-shadow:0 0 0 2px #fff inset}
+.sig-stage{border:1px solid var(--hairline);border-radius:8px;background:#fff;height:120px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.sig-stage canvas{max-width:100%;max-height:100%;cursor:crosshair}
+.sig-fonts{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--hairline);margin-top:12px}
+.sig-fonts label{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--hairline);cursor:pointer;font-size:24px;line-height:1;overflow:hidden;white-space:nowrap}
+.sig-fonts label:nth-child(odd){border-right:1px solid var(--hairline)}
+.sig-fonts input{flex-shrink:0}
 /* crop preview modal */
 .crop-prev{display:flex;gap:14px;align-items:flex-start}
 .crop-prev .pv{width:180px;height:130px;background:repeating-conic-gradient(#cdd 0 25%,#bcc 0 50%) 50%/16px 16px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0;border:1px solid var(--hairline)}
@@ -289,6 +306,7 @@ input[type=range]{flex:1;accent-color:var(--primary)}
           <span id="pg-label">1 / 1</span>
           <button class="btn sm" onclick="changePage(1)">▶</button>
         </div>
+        <button class="btn sm" onclick="openSigModal()">✍ Criar assinatura</button>
         <span class="hint">Arraste sobre o carimbo/assinatura que você quer recortar</span>
       </div>
       <div class="canvas-wrap" id="cwrap">
@@ -429,6 +447,36 @@ input[type=range]{flex:1;accent-color:var(--primary)}
       <div class="spacer"></div>
       <button class="btn secondary sm" onclick="closeModal('modal-company')">Cancelar</button>
       <button class="btn sm" onclick="saveCompany()">Salvar empresa</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL CRIAR ASSINATURA -->
+<div class="modal-bg" id="modal-sig">
+  <div class="modal" style="max-width:560px">
+    <h3>✍ Criar assinatura</h3>
+    <div class="sig-tabs">
+      <button id="sigtab-type" class="on" onclick="sigTab('type')">Digitar</button>
+      <button id="sigtab-draw" onclick="sigTab('draw')">Desenhar</button>
+    </div>
+    <div class="sig-colors" id="sig-colors"></div>
+
+    <div class="sig-pane on" id="sigpane-type">
+      <div class="fg" style="margin-bottom:10px"><label>Nome</label><input id="sig-text" placeholder="Digite seu nome" oninput="renderSigType()"></div>
+      <div class="sig-stage"><canvas id="sig-canvas-type"></canvas></div>
+      <div class="sig-fonts" id="sig-fonts"></div>
+    </div>
+
+    <div class="sig-pane" id="sigpane-draw">
+      <div class="sig-stage"><canvas id="sig-canvas-draw" width="900" height="240"></canvas></div>
+      <div style="text-align:center;margin-top:8px"><button class="btn secondary sm" onclick="clearSigDraw()">Limpar assinatura</button></div>
+    </div>
+
+    <div class="fg" style="margin-top:14px"><label>Empresa</label><select id="sig-company"></select></div>
+    <div class="fg"><label>Nome na biblioteca</label><input id="sig-name" placeholder="Ex.: Assinatura João"></div>
+    <div class="modal-actions">
+      <button class="btn secondary sm" onclick="closeModal('modal-sig')">Cancelar</button>
+      <button class="btn sm" onclick="confirmSig()">Salvar na biblioteca</button>
     </div>
   </div>
 </div>
@@ -899,6 +947,133 @@ async function confirmCrop(){
   stamps.push(mapSt(data));
   closeModal('modal-crop');renderLib();renderPicker();renderCompanies();toast('Recorte salvo na biblioteca');
 }
+/* ═══ CRIAR ASSINATURA (digitar / desenhar) ═══ */
+const SIG_FONTS=['Zeyada','Homemade Apple','Mrs Saint Delafield','Nothing You Could Do','Bad Script','Herr Von Muellerhoff','La Belle Aurore','Caveat'];
+const SIG_COLORS=['#111111','#1877f2','#5b2bd9'];
+let sigMode='type',sigFont=SIG_FONTS[0],sigColor=SIG_COLORS[0],sigDrawn=false;
+
+function openSigModal(){
+  $('sig-text').value='';$('sig-name').value='';
+  sigMode='type';sigFont=SIG_FONTS[0];sigColor=SIG_COLORS[0];
+  $('sig-colors').innerHTML=SIG_COLORS.map(c=>`<span data-c="${c}" style="background:${c}" onclick="setSigColor('${c}')"></span>`).join('');
+  $('sig-fonts').innerHTML=SIG_FONTS.map((f,i)=>`<label style="font-family:'${f}',cursive"><input type="radio" name="sigfont" ${i===0?'checked':''} onchange="setSigFont('${f}')"><span id="sig-font-lbl-${i}">Assinatura</span></label>`).join('');
+  fillSigCompany();sigTab('type');setSigColor(sigColor);
+  clearSigDraw();
+  $('modal-sig').classList.add('show');
+  if(document.fonts&&document.fonts.ready)document.fonts.ready.then(renderSigType);
+}
+function fillSigCompany(){$('sig-company').innerHTML=companies.map(c=>`<option value="${c.id}">${c.name}</option>`).join('');}
+function sigTab(m){
+  sigMode=m;
+  $('sigtab-type').classList.toggle('on',m==='type');
+  $('sigtab-draw').classList.toggle('on',m==='draw');
+  $('sigpane-type').classList.toggle('on',m==='type');
+  $('sigpane-draw').classList.toggle('on',m==='draw');
+}
+function setSigColor(c){
+  sigColor=c;
+  [...$('sig-colors').children].forEach(s=>s.classList.toggle('on',s.dataset.c===c));
+  renderSigType();redrawSigStrokes();
+}
+function setSigFont(f){sigFont=f;renderSigType();}
+
+function renderSigType(){
+  const txt=$('sig-text').value.trim();
+  SIG_FONTS.forEach((f,i)=>{const l=$('sig-font-lbl-'+i);if(l)l.textContent=txt||'Assinatura';});
+  const c=$('sig-canvas-type');
+  c.width=900;c.height=240;
+  const ctx=c.getContext('2d');
+  ctx.clearRect(0,0,c.width,c.height);
+  if(!txt)return;
+  drawHandwritten(ctx,txt,c.width,c.height,sigFont,sigColor);
+}
+
+// ruído determinístico: mesma assinatura sempre sai igual
+function sigRand(seed){let t=seed*1103515245+12345;t=(t^(t>>>13))>>>0;return (t%10000)/10000-0.5;}
+
+/* desenha char a char com baseline irregular, inclinação e pressão de tinta
+   — tira a cara de "texto digitado" */
+function drawHandwritten(ctx,txt,W,H,font,color){
+  let size=130;
+  do{ctx.font=`${size}px '${font}', cursive`;if(ctx.measureText(txt).width<=W-140)break;size-=5;}while(size>28);
+  ctx.textAlign='left';ctx.textBaseline='alphabetic';
+
+  const chars=[...txt];
+  const widths=chars.map(ch=>ctx.measureText(ch).width);
+  const kern=chars.map((ch,i)=>ch===' '?0:sigRand(i*37+txt.length)*size*0.035);
+  const total=widths.reduce((a,b)=>a+b,0)+kern.reduce((a,b)=>a+b,0);
+
+  const slant=-0.055+sigRand(txt.length*7)*0.03;      // inclinação da mão
+  ctx.save();
+  ctx.translate(W/2,H/2);ctx.rotate(slant);ctx.translate(-total/2,size*0.30);
+  ctx.fillStyle=color;
+
+  let x=0;
+  chars.forEach((ch,i)=>{
+    if(ch===' '){x+=widths[i]+kern[i];return;}
+    const dy=sigRand(i*13+1)*size*0.055;              // baseline treme
+    const sc=1+sigRand(i*29+3)*0.07;                  // tamanho varia
+    const rot=sigRand(i*53+5)*0.07;                   // cada letra torta
+    ctx.save();
+    ctx.translate(x+widths[i]/2,dy);ctx.rotate(rot);ctx.scale(sc,sc);
+    ctx.globalAlpha=0.88+Math.abs(sigRand(i*61+7))*0.24;   // pressão da caneta
+    ctx.fillText(ch,-widths[i]/2,0);
+    ctx.globalAlpha=0.35;                              // 2ª passada = tinta encorpada
+    ctx.fillText(ch,-widths[i]/2+0.6,0.5);
+    ctx.restore();
+    x+=widths[i]+kern[i];
+  });
+  ctx.restore();
+}
+
+/* desenho livre */
+let sigStrokes=[],sigDrawing=false;
+function sigPt(e,c){const r=c.getBoundingClientRect();return{x:(e.clientX-r.left)*(c.width/r.width),y:(e.clientY-r.top)*(c.height/r.height)};}
+function clearSigDraw(){sigStrokes=[];sigDrawn=false;redrawSigStrokes();}
+function redrawSigStrokes(){
+  const c=$('sig-canvas-draw');if(!c)return;
+  const ctx=c.getContext('2d');
+  ctx.clearRect(0,0,c.width,c.height);
+  ctx.strokeStyle=sigColor;ctx.lineWidth=4;ctx.lineCap='round';ctx.lineJoin='round';
+  sigStrokes.forEach(s=>{ctx.beginPath();s.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));ctx.stroke();});
+}
+(function bindSigDraw(){
+  const c=$('sig-canvas-draw');if(!c)return;
+  const down=e=>{sigDrawing=true;sigDrawn=true;sigStrokes.push([sigPt(e,c)]);c.setPointerCapture&&c.setPointerCapture(e.pointerId);};
+  const move=e=>{if(!sigDrawing)return;sigStrokes[sigStrokes.length-1].push(sigPt(e,c));redrawSigStrokes();};
+  const up=()=>{sigDrawing=false;};
+  c.addEventListener('pointerdown',down);c.addEventListener('pointermove',move);
+  c.addEventListener('pointerup',up);c.addEventListener('pointerleave',up);
+})();
+
+/* recorta espaço vazio ao redor */
+function trimCanvas(src,pad){
+  const ctx=src.getContext('2d'),d=ctx.getImageData(0,0,src.width,src.height).data;
+  let x0=src.width,y0=src.height,x1=-1,y1=-1;
+  for(let y=0;y<src.height;y++)for(let x=0;x<src.width;x++){
+    if(d[(y*src.width+x)*4+3]>8){if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;}
+  }
+  if(x1<0)return null;
+  pad=pad||10;
+  x0=Math.max(0,x0-pad);y0=Math.max(0,y0-pad);x1=Math.min(src.width-1,x1+pad);y1=Math.min(src.height-1,y1+pad);
+  const out=document.createElement('canvas');out.width=x1-x0+1;out.height=y1-y0+1;
+  out.getContext('2d').drawImage(src,x0,y0,out.width,out.height,0,0,out.width,out.height);
+  return out;
+}
+
+async function confirmSig(){
+  const src=sigMode==='type'?$('sig-canvas-type'):$('sig-canvas-draw');
+  if(sigMode==='type'&&!$('sig-text').value.trim())return toast('Digite o nome da assinatura');
+  if(sigMode==='draw'&&!sigDrawn)return toast('Desenhe a assinatura');
+  const out=trimCanvas(src,12);
+  if(!out)return toast('Assinatura vazia');
+  const name=$('sig-name').value.trim()||$('sig-text').value.trim()||('Assinatura '+(stamps.length+1));
+  const row={company_id:$('sig-company').value,type:'assinatura',name,data:out.toDataURL('image/png')};
+  const{data}=await sb.from('stamps').insert(row).select().single();
+  if(data)stamps.push(mapSt(data));
+  closeModal('modal-sig');renderLib();renderPicker();renderCompanies();toast('Assinatura salva na biblioteca');
+}
+
 function fillCropCompany(){$('crop-company').innerHTML=companies.map(c=>`<option value="${c.id}">${c.name}</option>`).join('');}
 function fillLibFilter(){$('lib-filter').innerHTML='<option value="">Todas as empresas</option>'+companies.map(c=>`<option value="${c.id}">${c.name}</option>`).join('');}
 function renderLib(){
